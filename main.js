@@ -7,7 +7,7 @@ import {gui, process_Image} from './ip.js';
 var camera, controls, scene, renderer;
 
 // Image and Video Textures
-var image_Texture, imageProcessing, video;
+var image_Texture, image_Texture2, imageProcessing, video;
 
 init();
 animate();
@@ -19,8 +19,15 @@ function image_Processing(width, height){
 	image_Texture.generateMipmaps = false; 
 	image_Texture.format = THREE.RGBFormat;
 
+	if(typeof image_Texture2 !== 'undefined'){
+		image_Texture2.minFilter = THREE.NearestFilter;
+		image_Texture2.magFilter = THREE.NearestFilter;
+		image_Texture2.generateMipmaps = false; 
+		image_Texture2.format = THREE.RGBFormat;
+	}
+
 	var images;
-    const result = process_Image(image_Texture, width, height);
+    const result = process_Image(image_Texture, image_Texture2, width, height);
     scene.add(result.images);
     imageProcessing = result.imageProcessing;
 }
@@ -58,6 +65,7 @@ function load_Image(){
     image_Texture = new THREE.TextureLoader().load('im0.png', function (tex) {
         image_Processing(tex.image.width, tex.image.height);
     });
+	image_Texture2 = new THREE.TextureLoader().load('image2.jpg');
 }
 
 // Loading and Processing Video Frames
@@ -72,6 +80,7 @@ function load_Video(){
 
 // Loading and Processing Webcam Frames
 function open_Webcam(){
+	image_Texture2 = new THREE.TextureLoader().load('image2.jpg');
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia ) {
         const constraints = { video: { width: 1920, height: 1080, facingMode: 'user' } };
         navigator.mediaDevices.getUserMedia( constraints ).then( function ( stream ){
@@ -111,13 +120,31 @@ function init () {
 	controls.addEventListener( 'change', render );
 	controls.update();
 
+	// Benchmark
+	const button = {benchMark: function (){
+			var begin = performance.now();
+			
+			IVprocess();
+		
+			var end = performance.now();
+			window.alert("Execution Time: " + (end-begin) + "s");
+		}
+	};
+	gui.add( button, 'benchMark' ); // Button
+
 
     var url = new URL(window.location);
     var sourcetype = url.searchParams.get("sourceimage");
     
-    if(sourcetype == "image")   load_Image();
-    else if(sourcetype == "video")  load_Video();
-    else if(sourcetype == "webcam") open_Webcam();
+    if(sourcetype == "image"){
+		load_Image();
+	}
+    else if(sourcetype == "video"){
+		load_Video();
+	}
+    else if(sourcetype == "webcam"){
+		open_Webcam();
+	}
     else{
         const source = {type: 0}; load_Image();
         gui.add(source, 'type', { Image: 0, Video: 1, Webcam: 2 }).name('Source Type').onChange(type => {
@@ -125,17 +152,22 @@ function init () {
             else          window.location.href += "?sourceimage=webcam";
         });
     }
+
 	window.addEventListener( 'resize', onWindowResize, false );
+}
+
+function IVprocess(){
+	renderer.setRenderTarget( imageProcessing.rtt );
+	renderer.render ( imageProcessing.scene, imageProcessing.orthoCamera ); 	
+	renderer.setRenderTarget( null );
 }
 
 // Rendering Function
 function render () {
 	renderer.clear();
 	
-	if (typeof imageProcessing !== 'undefined'){
-        renderer.setRenderTarget( imageProcessing.rtt );
-	    renderer.render ( imageProcessing.scene, imageProcessing.orthoCamera ); 	
-	    renderer.setRenderTarget( null );
+	if (typeof imageProcessing !== 'undefined'){	
+        IVprocess();
     }
 	renderer.render( scene, camera );
 }

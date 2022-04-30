@@ -41,37 +41,238 @@ void main() {
 <script id="fragShader" type="shader">
 precision highp float;
 
+// Input Image
 uniform sampler2D image;
-uniform mat3 kernel_x;
-uniform mat3 kernel_y;
-uniform int type;
+
+// Scaling Parameters
+uniform bool scale;
+uniform int scale_factor;
+
+// Arithmetic Parameters
+uniform int arith_type;
+uniform int arith_scale_factor;
+uniform float offset;
+uniform sampler2D image_2;
+
+// Convolution Parameters
+uniform int conv_type;
+uniform int kernel_size;
+uniform float sigma;
+
+uniform float gaussian_kernel[MAX_SIZE_GAUSSIAN];
+uniform mat3 laplacian_kernel;
+
+// Denoising Filter Parameters
+uniform int denoise_type;
+uniform int denoise_kernel_size;
+uniform int percentage;
+
+// Color Transformation
+uniform int color_type;
+uniform mat3 xyz_Matrix;
+uniform mat3 rgb_Matrix;
+uniform float hue;
+
+const float M_PI = 3.14159265359;
+const float E = 0.2068965517241379;
+const vec3 	R = vec3(0.9504492182750991, 1.0, 1.0889166484304715)*100.0; //White Reference - D65
 
 out vec4 FragColor;
 
+// Bilinear Interpolation
+vec3 bilinear_interpolation(int x, int y, float x_diff, float y_diff){
+	vec3 A = texelFetch(image, ivec2(x, y), 0).rgb;
+	vec3 B = texelFetch(image, ivec2(x, y + 1), 0).rgb; 
+	vec3 C = texelFetch(image, ivec2(x + 1, y), 0).rgb; 
+	vec3 D = texelFetch(image, ivec2(x + 1, y + 1), 0).rgb; 
 
-float get_grayscale(vec4 color){
-	return 0.299*color.r + 0.587*color.g + 0.114*color.b;
+	return A * (1.0 - x_diff) * (1.0 - y_diff) + B * x_diff*(1.0 - y_diff) + C * (1.0 - x_diff) * y_diff + D * x_diff * y_diff;
+}
+
+// Bubble sort
+void sort (float array[MAX_SIZE_DENOISE], int window_size){
+	for (int i = 0; i < window_size-1; i++) {
+		for (int j = 0; j < window_size-i-1; j++) {
+			if (array[j] > array[j+1]) {
+				float temp = array[j];
+				array[j] = array[j+1];
+				array[j+1] = temp;
+			}
+		}
+	}
+}
+
+float linearize(float c){
+	if(c <= 0.04045) return c/12.92;
+	return pow(((c+0.055)/1.055), 2.4);
+}
+
+float linearize_inverse(float c){
+	if(c <= 0.0031308) return 12.92*c;
+	return (1.055 * pow(c, 1.0/2.4)) - 0.055;
+}
+
+// Color Transformation Functions
+// rgb to XYZ
+vec3 rgb2XYZ(vec3 pixel){
+	vec3 linear_color = vec3(linearize(pixel.r), linearize(pixel.g), linearize(pixel.b));
+	return (xyz_Matrix * linear_color);
+}
+
+float F(float v){
+	if(v > pow(E, 3.0)) return pow(v, 1.0/3.0);
+	return ((v/(3.0*pow(E, 2.0))) + 0.1379310344827586);
+}
+
+float F_inverse(float v){
+	if(v > E) return pow(v, 3.0);
+	return (3.0*pow(E, 2.0)) * (v - 0.1379310344827586);
+}
+
+// rgb to Lab
+vec3 rgb2Lab(vec3 pixel){
+	vec3 XYZ = rgb2XYZ(pixel);
+	float Fx = F(XYZ.x / R.x);
+	float Fy = F(XYZ.y / R.y);
+	float Fz = F(XYZ.z / R.z);
+
+	return vec3((116.0*Fy)-16.0, 500.0*(Fx-Fy), 200.0*(Fy-Fz));
+}
+
+// rgb to LCh
+vec3 rgb2LCh(vec3 pixel){
+	vec3 lab = rgb2Lab(pixel);
+	float c = length(vec2(lab.y, lab.z));
+	float h = degrees(atan(lab.z, lab.y)) + hue;
+	h = h > 360.0? h - 360.0: h;
+	return vec3(lab.x, c, radians(h));
+}
+
+vec3 LCh2rgb(vec3 pixel){
+	vec3 Lab = vec3(pixel.x, pixel.y * cos(pixel.z), pixel.y * sin(pixel.z));
+	float L_star = (Lab.x + 16.0) / 116.0;
+	float a_star = Lab.y / 500.0;
+	float b_star = Lab.z / 200.0;
+	vec3 XYZ = vec3(R.x * F_inverse(L_star + a_star),
+					R.y * F_inverse(L_star),
+					R.z * F_inverse(L_star - b_star));
+	vec3 color = rgb_Matrix * XYZ;
+	return vec3(linearize_inverse(color.r), linearize_inverse(color.g), linearize_inverse(color.b));
 }
 
 void main(void) {
-	if (type == 1){
-		int size = 1;
-		float x = 0.0, y = 0.0;
+	vec3 pixel = vec3(1.0);
+
+	if(scale && scale_factor > 1){	// Scaling Algorithm - Bilinear Interpolation
+		float ratio = 1.0 / float(scale_factor);
+		int x = int(ratio * float(gl_FragCoord.x * float(scale_factor)));
+		int y = int(ratio * float(gl_FragCoord.y * float(scale_factor)));
+
+		float x_diff = (ratio * float(gl_FragCoord.x * float(scale_factor))) - float(x);
+		float y_diff = (ratio * float(gl_FragCoord.y * float(scale_factor))) - float(y);
 		
-		for (int i=-size; i<=size; i++)
-			for (int j=-size; j<=size; j++){
-				float pixel = get_grayscale(texelFetch(image, ivec2(i + int(gl_FragCoord.x), j + int(gl_FragCoord.y)), 0));
-				y += kernel_y[i+size][j+size] * pixel;
-				x += kernel_x[i+size][j+size] * pixel;
+		pixel = bilinear_interpolation(x, y, x_diff, y_diff); 
+	}
+	else{ // Default Option - Scaling = 1
+		pixel = texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb; //vec3(1.0);
+	}
+
+	// Arithmetic Operation
+	if(arith_type != 0){
+		vec3 pixel_1 = texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb;
+		vec3 pixel_2 = texelFetch(image_2, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb;
+
+		if (arith_type == 1) 	 pixel = (pixel_1 + pixel_2);
+		else if(arith_type == 2) pixel = (pixel_1 - pixel_2);
+		else if(arith_type == 3) pixel = (pixel_1 * pixel_2);
+		else if(arith_type == 4) pixel = (pixel_1 / pixel_2);
+	}
+	pixel *= float(arith_scale_factor);
+	pixel += vec3(offset);				// Adding Offset Value
+	FragColor = vec4(pixel, 1.0);
+
+	/************************ End of Scaling and Arithmetic Operation ******************************/
+
+	// Convolution Operation
+	float sum = 0.0, Coeff, s = 2.0*sigma*sigma;
+	pixel = vec3(0.0);
+
+	if(conv_type == 1){		// Gaussian Filter - Calculate fiilter on CPU
+		int size = (kernel_size%2 == 0)? kernel_size/2: (kernel_size-1)/2;
+		int counter = 0;
+		for(int i = -size; i<=size; i++){
+			for(int j = -size; j<=size; j++){
+				pixel += texelFetch(image, ivec2(i + int(gl_FragCoord.x), j + int(gl_FragCoord.y)), 0).rgb * gaussian_kernel[counter];
+				counter++;
 			}
-		
-		float mag = sqrt(x*x + y*y);
-		FragColor = vec4(vec3(mag, mag, mag), 1.0);
+		}
+		FragColor = vec4(pixel, 1.0);
 	}
-	else{
-		float pixel = get_grayscale(texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0));
-		FragColor = vec4(vec3(pixel, pixel, pixel), 1.0);
+	else if (conv_type == 2){	// Laplacian Filter
+		int size = 1;
+		for(int i = -size; i<=size; i++){
+			for(int j = -size; j<=size; j++){
+				pixel += texelFetch(image, ivec2(i + int(gl_FragCoord.x), j + int(gl_FragCoord.y)), 0).rgb * laplacian_kernel[i+size][j+size];
+			}
+		}
+		//vec3 x = texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb;
+		//FragColor = vec4((pixel), 1.0);
+		FragColor = vec4(pow(pixel, vec3(1.0/sigma)), 1.0);
 	}
+
+	// Denoising Filter
+	if(denoise_type == 1){
+		int size = int(float(denoise_kernel_size - 1)/2.0);
+		float R_array[MAX_SIZE_DENOISE], G_array[MAX_SIZE_DENOISE], B_array[MAX_SIZE_DENOISE];
+
+		// Get array when window is convolved over image
+		int window_size = 0;
+		for(int i = -size; i<=size; i++){
+			for(int j = -size; j<=size; j++){
+				pixel = texelFetch(image, ivec2(i + int(gl_FragCoord.x), j + int(gl_FragCoord.y)), 0).rgb;
+				R_array[window_size] = pixel.r; 
+				G_array[window_size] = pixel.g; 
+				B_array[window_size] = pixel.b;
+				window_size++;
+			}
+		}
+
+		// Sort neighbors (RGB arrays) in ascending order
+		sort(R_array, window_size);
+		sort(G_array, window_size);
+		sort(B_array, window_size);
+
+		// Get median - since window_size is always odd, index = window_size/2
+		int index = int(float(window_size) / 2.0);
+
+		// Using either Median Filter or Average Filter
+		int length = int((float(window_size) * float(percentage)/100.0)/2.0);
+
+		float r = 0.0, g = 0.0, b = 0.0;
+		for(int i=index-length; i<=index+length; i++){
+			r += R_array[i]; 
+			g += G_array[i];
+			b += B_array[i];
+		}
+
+		pixel = vec3(r, g, b) / float(2*length + 1);
+		FragColor = vec4(pixel, 1.0);
+	}
+
+	// Color Transformation
+	if(color_type == 1){
+		pixel = texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb;
+		FragColor = vec4(rgb2XYZ(pixel), 1.0);
+	}
+	else if(color_type == 2){
+		pixel = texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb;
+		FragColor = vec4(rgb2Lab(pixel), 1.0);
+	}
+	else if(color_type == 3){
+		pixel = texelFetch(image, ivec2(int(gl_FragCoord.x), int(gl_FragCoord.y)), 0).rgb;
+		FragColor = vec4(LCh2rgb(rgb2LCh(pixel)), 1.0);
+	}
+	
 }
 </script>
     <script type="module" src="/main.js"></script>
