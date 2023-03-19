@@ -146,9 +146,9 @@ function init () {
 		open_Webcam();
 	}
     else{
-        const source = {type: 0}; load_Image();
+        const source = {type: 1}; load_Video();
         gui.add(source, 'type', { Image: 0, Video: 1, Webcam: 2 }).name('Source Type').onChange(type => {
-            if(type == 1) window.location.href += "?sourceimage=video";
+            if(type == 0) window.location.href += "?sourceimage=image";
             else          window.location.href += "?sourceimage=webcam";
         });
     }
